@@ -23,12 +23,9 @@ REQUIRES: Accessibility permission
 ║  RT ░░   ║  Down Arrow  ║  Scroll Down(pressure=speed)║
 ║  D-Up    ║  Volume Up   ║  System Volume +           ║
 ║  D-Down  ║  Volume Down ║  System Volume -           ║
-║  D-Left  ║  J           ║  YouTube Rewind 10s        ║
-║  D-Right ║  L           ║  YouTube Fwd 10s           ║
-║  LS ↑ ░░ ║  Page Up     ║  Page Up                   ║
-║  LS ↓ ░░ ║  Page Down   ║  Page Down                 ║
-║  LS ← ░░ ║  Cmd+Shift+[ ║  Previous Tab              ║
-║  LS → ░░ ║  Cmd+Shift+] ║  Next Tab                  ║
+║  D-Left  ║  Cmd+Shift+[ ║  Previous Tab              ║
+║  D-Right ║  Cmd+Shift+] ║  Next Tab                  ║
+║  LS ░░   ║  Mouse Move  ║  Cursor (analog)           ║
 ║  LSB     ║  Cmd+T       ║  New Tab                   ║
 ║  RS ↑ ░░ ║  Up Arrow    ║  Scroll Up                 ║
 ║  RS ↓ ░░ ║  Down Arrow  ║  Scroll Down               ║
@@ -53,6 +50,7 @@ import signal
 import subprocess
 
 import objc
+import Quartz
 from Foundation import (
     NSNotificationCenter, NSRunLoop, NSDate, NSTimer, NSObject, NSLog
 )
@@ -143,7 +141,7 @@ DEFAULT = {
     "triggers":  ["up",       "down"],
 
     # D-Pad (Up, Down, Left, Right)
-    "dpad":      ["volume-up","volume-down", "j",   "l"],
+    "dpad":      ["volume-up","volume-down", "cmd+shift+[", "cmd+shift+]"],
 
     # Left Stick (↑ ↓ ← →, press)
     "lstick":    ["pageup",   "pagedown", "cmd+shift+[","cmd+shift+]", "cmd+t"],
@@ -286,11 +284,12 @@ class AnalogTrigger:
 class StickAxis:
     """Handles one stick axis with two directions."""
     def __init__(self, neg_key_code, neg_mods, pos_key_code, pos_mods,
-                 deadzone=0.40, threshold=0.45):
+                 deadzone=0.25, threshold=0.30):
         self.neg_key = neg_key_code       # negative direction
         self.neg_mods = neg_mods if isinstance(neg_mods, list) else [neg_mods]
         self.pos_key = pos_key_code       # positive direction
         self.pos_mods = pos_mods if isinstance(pos_mods, list) else [pos_mods]
+        self.name = "axis"
         self.deadzone = deadzone
         self.threshold = threshold
         self.value = 0.0
@@ -312,13 +311,54 @@ class StickAxis:
 
         if self.value < -self.threshold and self.neg_key is not None:
             if now - self.last_neg >= interval:
+                NSLog(f"[xctrl] {self.name} → key {self.neg_key}")
                 _send_key(self.neg_key, self.neg_mods)
                 self.last_neg = now
 
         if self.value > self.threshold and self.pos_key is not None:
             if now - self.last_pos >= interval:
+                NSLog(f"[xctrl] {self.name} → key {self.pos_key}")
                 _send_key(self.pos_key, self.pos_mods)
                 self.last_pos = now
+
+
+class MouseStick:
+    """Maps analog stick to mouse cursor movement."""
+    def __init__(self, deadzone=0.15, max_speed=18):
+        self.deadzone = deadzone
+        self.max_speed = max_speed
+        self.x = 0.0
+        self.y = 0.0
+
+    def update_x(self, value):
+        self.x = value
+
+    def update_y(self, value):
+        self.y = value
+
+    def tick(self):
+        ax, ay = abs(self.x), abs(self.y)
+        if ax < self.deadzone and ay < self.deadzone:
+            return
+
+        def speed(v):
+            if abs(v) < self.deadzone:
+                return 0
+            t = (abs(v) - self.deadzone) / (1.0 - self.deadzone)
+            return self.max_speed * (t ** 2) * (1 if v > 0 else -1)
+
+        dx = speed(self.x)
+        dy = speed(self.y)
+        if dx == 0 and dy == 0:
+            return
+
+        pos = Quartz.CGEventGetLocation(Quartz.CGEventCreate(None))
+        new_x = pos.x + dx
+        new_y = pos.y + dy
+        event = Quartz.CGEventCreateMouseEvent(
+            None, Quartz.kCGEventMouseMoved, (new_x, new_y), 0
+        )
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -341,6 +381,7 @@ class Controller(NSObject):
         # Analog components (processed by tick_)
         self._triggers = []    # list of AnalogTrigger
         self._stick_axes = []  # list of StickAxis
+        self._mouse_stick = None  # MouseStick or None
 
         return self
 
@@ -378,10 +419,11 @@ class Controller(NSObject):
         return handler
 
     # ── Stick axis handler ──────────────────────────────
-    def _make_stick_axis(self, neg_key, pos_key):
+    def _make_stick_axis(self, neg_key, pos_key, name=""):
         nkc, nmods = _resolve(neg_key)
         pkc, pmods = _resolve(pos_key)
         axis = StickAxis(nkc, nmods, pkc, pmods)
+        axis.name = name
         self._stick_axes.append(axis)
 
         def handler(axis_input, value):
@@ -396,6 +438,7 @@ class Controller(NSObject):
 
         self._triggers = []
         self._stick_axes = []
+        self._mouse_stick = None
         refs = {}
 
         def bind_digital(button, name, key_name):
@@ -410,8 +453,8 @@ class Controller(NSObject):
                 refs[key_name] = h
                 button.setValueChangedHandler_(h)
 
-        def bind_axis(axis_input, neg_key, pos_key):
-            h = self._make_stick_axis(neg_key, pos_key)
+        def bind_axis(axis_input, neg_key, pos_key, name=""):
+            h = self._make_stick_axis(neg_key, pos_key, name)
             if h:
                 # key is not used for retrieval, just keep alives
                 refs[id(axis_input)] = h
@@ -442,19 +485,21 @@ class Controller(NSObject):
             bind_digital(gp.dpad().left(),  "D-Left",  CFG["dpad"][2])
             bind_digital(gp.dpad().right(), "D-Right", CFG["dpad"][3])
 
-        # Left Stick (analog axes + digital press)
-        if len(CFG["lstick"]) >= 5:
-            ls = gp.leftThumbstick()
-            bind_axis(ls.xAxis(), CFG["lstick"][2], CFG["lstick"][3])  # ← →
-            bind_axis(ls.yAxis(), CFG["lstick"][0], CFG["lstick"][1])  # ↑ ↓
-            if hasattr(gp, 'leftThumbstickButton'):
-                bind_digital(gp.leftThumbstickButton(), "LSB", CFG["lstick"][4])
+        # Left Stick → mouse cursor + digital press
+        self._mouse_stick = MouseStick()
+        ls = gp.leftThumbstick()
+        refs["mouse_x"] = ls.xAxis()
+        ls.xAxis().setValueChangedHandler_(lambda inp, v: self._mouse_stick.update_x(v))
+        refs["mouse_y"] = ls.yAxis()
+        ls.yAxis().setValueChangedHandler_(lambda inp, v: self._mouse_stick.update_y(v))
+        if hasattr(gp, 'leftThumbstickButton'):
+            bind_digital(gp.leftThumbstickButton(), "LSB", CFG["lstick"][4])
 
         # Right Stick (analog axes + digital press)
         if len(CFG["rstick"]) >= 5:
             rs = gp.rightThumbstick()
-            bind_axis(rs.xAxis(), CFG["rstick"][2], CFG["rstick"][3])  # ← →
-            bind_axis(rs.yAxis(), CFG["rstick"][0], CFG["rstick"][1])  # ↑ ↓
+            bind_axis(rs.xAxis(), CFG["rstick"][2], CFG["rstick"][3], "RS←→")  # ← →
+            bind_axis(rs.yAxis(), CFG["rstick"][0], CFG["rstick"][1], "RS↑↓")  # ↑ ↓
             if hasattr(gp, 'rightThumbstickButton'):
                 bind_digital(gp.rightThumbstickButton(), "RSB", CFG["rstick"][4])
 
@@ -509,6 +554,7 @@ class Controller(NSObject):
         self._handler_refs = {}
         self._triggers = []
         self._stick_axes = []
+        self._mouse_stick = None
 
     # ── Notifications ────────────────────────────────────
     def onControllerConnect_(self, note):
@@ -527,6 +573,8 @@ class Controller(NSObject):
             t.tick()
         for a in self._stick_axes:
             a.tick()
+        if self._mouse_stick:
+            self._mouse_stick.tick()
 
         # Reconnection scan (every ~5s)
         if not self.gamepad:
