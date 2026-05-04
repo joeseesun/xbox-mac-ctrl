@@ -31,6 +31,8 @@ REQUIRES: Accessibility permission
 ║  RSB     ║  Cmd+W       ║  Close Tab                 ║
 ║  Start   ║  Cmd+Space   ║  Spotlight                 ║
 ║  Select  ║  Escape      ║  Exit / Cancel             ║
+║  Xbox    ║  Launchpad   ║  App Launcher              ║
+║  Share   ║  Cmd+Shift+3 ║  Full Screenshot           ║
 ╚══════════╩══════════════╩════════════════════════════╝
   ░░ = analog input (pressure-sensitive, variable rate)
 
@@ -38,6 +40,8 @@ Usage:
   xbox-mac-ctrl                                 # Default mapping
   xbox-mac-ctrl --help                          # Show all options
   xbox-mac-ctrl --reading                       # Reading mode (微信读书 etc)
+  xbox-mac-ctrl --xbox=launchpad                # Custom Xbox button
+  xbox-mac-ctrl --share=none                    # Disable Share button
 """
 
 import os
@@ -98,6 +102,7 @@ KEY_TABLE = {
     "cmd+space":      (49, ["command"]),
     "cmd+f":          (3, ["command"]),
     "cmd+r":          (15, ["command"]),
+    "cmd+shift+3":    (20, ["command", "shift"]),
 }
 
 # AppleScript for volume (no CGEvent API for this)
@@ -139,6 +144,12 @@ DEFAULT = {
 
     # System buttons (Select/View, Start/Menu)
     "sys":       ["escape",   "cmd+space"],
+
+    # Xbox Logo (center) → Launchpad
+    "xbox":      ["launchpad"],
+
+    # Share button (Xbox Series X|S) → Full screenshot
+    "share":     ["cmd+shift+3"],
 }
 
 READING = {
@@ -149,6 +160,8 @@ READING = {
     "lstick":    ["left",     "right",    "up",       "down",     "cmd+t"],
     "rstick":    ["up",       "down",     "cmd+[",    "cmd+]",    "cmd+w"],
     "sys":       ["escape",   "cmd+space"],
+    "xbox":      ["launchpad"],
+    "share":     ["cmd+shift+3"],
 }
 
 
@@ -166,7 +179,7 @@ def _parse_args():
         if arg == "--help" or arg == "-h":
             print(__doc__)
             sys.exit(0)
-        for key in ["face", "shoulders", "triggers", "dpad", "lstick", "rstick", "sys"]:
+        for key in ["face", "shoulders", "triggers", "dpad", "lstick", "rstick", "sys", "xbox", "share"]:
             if arg.startswith(f"--{key}="):
                 cfg[key] = [k.strip() for k in arg.split("=", 1)[1].split(",")]
 
@@ -181,7 +194,7 @@ def _resolve(key_name):
     name = key_name.strip().lower()
     if name == "none":
         return None, []
-    if name in ("click", "rightclick", "volume-up", "volume-down"):
+    if name in ("click", "rightclick", "volume-up", "volume-down", "launchpad"):
         return ("special", name)
     entry = KEY_TABLE.get(name)
     if entry is None:
@@ -222,6 +235,12 @@ def _send_key(key_code, modifiers):
         return
     if key_code == "special" and modifiers == "volume-down":
         subprocess.run(["osascript", "-e", _VOL_DOWN], capture_output=True, timeout=3)
+        return
+
+    # ── Launchpad (AppleScript) ──
+    if key_code == "special" and modifiers == "launchpad":
+        subprocess.run(["osascript", "-e",
+            'tell application "Launchpad" to activate'], capture_output=True, timeout=3)
         return
 
     if key_code is None or key_code == "special":
@@ -508,6 +527,16 @@ class Controller(NSObject):
                 bind_digital(gp.buttonOptions(), "Select", CFG["sys"][0])
             bind_digital(gp.buttonMenu(), "Start", CFG["sys"][1])
 
+        # Xbox Logo button → Launchpad (may be intercepted by macOS ≥11)
+        if CFG.get("xbox") and len(CFG["xbox"]) >= 1:
+            if hasattr(gp, 'buttonHome'):
+                bind_digital(gp.buttonHome(), "Xbox", CFG["xbox"][0])
+
+        # Share button (Xbox Series X|S) → Screenshot
+        if CFG.get("share") and len(CFG["share"]) >= 1:
+            if hasattr(gp, 'buttonShare'):
+                bind_digital(gp.buttonShare(), "Share", CFG["share"][0])
+
         self._handler_refs = refs
         self.gamepad = gp
         self.connected_ctrl = ctrl
@@ -524,6 +553,10 @@ class Controller(NSObject):
         for group, keys in CFG.items():
             if group == "sys":
                 lines.append(f"  Select={keys[0]}  Start={keys[1]}")
+            elif group == "xbox":
+                lines.append(f"  Xbox={keys[0]}")
+            elif group == "share":
+                lines.append(f"  Share={keys[0]}")
             else:
                 lines.append(f"  {group}: {', '.join(keys)}")
         for line in lines:

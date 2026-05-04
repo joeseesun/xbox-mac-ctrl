@@ -16,6 +16,10 @@ curl -fsSL https://raw.githubusercontent.com/joeseesun/xbox-mac-ctrl/main/setup.
 
 安装后开箱即用，开机自启。拿起手柄就能操控 Mac。
 
+**安装前需要授权**（必须，否则按键无效）：
+
+> 系统设置 → 隐私与安全性 → 辅助功能 → 勾选终端（或 iTerm）
+
 ## 手柄布局与完整映射
 
 ```
@@ -40,7 +44,7 @@ curl -fsSL https://raw.githubusercontent.com/joeseesun/xbox-mac-ctrl/main/setup.
         │     十字键 ←→ = 切标签页                │
         │                                      │
         │   Select = Esc    Start = 搜索        │
-        │                                      │
+        │     Share = 截图       Xbox = 系统预留 │
         └──────────────────────────────────────┘
 ```
 
@@ -66,8 +70,10 @@ curl -fsSL https://raw.githubusercontent.com/joeseesun/xbox-mac-ctrl/main/setup.
 | **RSB（按下）** | Cmd+W | 关闭标签页/窗口 | 浏览器关标签、Finder 关窗口 |
 | **Select** | Esc | 退出/取消 | 退出全屏、关闭弹窗 |
 | **Start** | Cmd+Space | Spotlight 搜索 | 快速启动应用、搜索文件 |
+| **Share** | Cmd+Shift+3 | 全屏截图 | 截图保存到桌面或"最近使用" |
+| **Xbox Logo** | — | 系统预留 | macOS 系统拦截，无法映射 |
 
-**16 个控件全部映射，一个不浪费。**
+**Share 按钮为 Xbox Series X\|S 手柄专属。Xbox Logo 被 macOS 系统拦截（弹出 Game Center），不可用。**
 
 ## 分场景操作指南
 
@@ -176,7 +182,9 @@ xbox-mac-ctrl \
   --dpad=volume-up,volume-down,cmd+shift+[,cmd+shift+] \
   --shoulders=left,right \
   --triggers=up,down \
-  --sys=escape,cmd+space
+  --sys=escape,cmd+space \
+  --share=cmd+shift+3 \
+  --xbox=launchpad
 ```
 
 ### 支持的按键值
@@ -186,8 +194,8 @@ xbox-mac-ctrl \
 | 鼠标 | `click`, `rightclick` |
 | 导航 | `left`, `right`, `up`, `down`, `pageup`, `pagedown` |
 | 功能 | `space`, `escape`, `enter`, `tab`, `backspace`, `delete` |
-| 组合键 | `cmd+[`, `cmd+]`, `cmd+shift+[`, `cmd+shift+]`, `cmd+t`, `cmd+w`, `cmd+space`, `cmd+f`, `cmd+r` |
-| 系统 | `volume-up`, `volume-down` |
+| 组合键 | `cmd+[`, `cmd+]`, `cmd+shift+[`, `cmd+shift+]`, `cmd+t`, `cmd+w`, `cmd+space`, `cmd+f`, `cmd+r`, `cmd+shift+3` |
+| 系统 | `volume-up`, `volume-down`, `launchpad` |
 | 禁用 | `none` |
 
 ## 常见问题
