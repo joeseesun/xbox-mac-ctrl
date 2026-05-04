@@ -1,0 +1,642 @@
+#!/usr/bin/env python3
+"""
+Xbox Controller → macOS Full Keyboard Mapper
+============================================
+Uses macOS GameController framework (Bluetooth & USB).
+Sends keystrokes via AppleScript System Events.
+
+REQUIRES: Accessibility permission
+  System Settings → Privacy & Security → Accessibility → add Terminal.app
+
+╔══════════════════════════════════════════════════════╗
+║               DEFAULT MAPPING                        ║
+╠══════════╦══════════════╦════════════════════════════╣
+║  BUTTON  ║    ACTION    ║  DESCRIPTION               ║
+╠══════════╬══════════════╬════════════════════════════╣
+║  A       ║  Space       ║  Play/Pause                ║
+║  B       ║  Cmd+[       ║  Browser Back              ║
+║  X       ║  F           ║  Fullscreen Toggle         ║
+║  Y       ║  M           ║  Mute Toggle               ║
+║  LB      ║  Left Arrow  ║  Seek Back / Prev Page     ║
+║  RB      ║  Right Arrow ║  Seek Fwd  / Next Page     ║
+║  LT ░░   ║  Up Arrow    ║  Scroll Up  (pressure=speed)║
+║  RT ░░   ║  Down Arrow  ║  Scroll Down(pressure=speed)║
+║  D-Up    ║  Volume Up   ║  System Volume +           ║
+║  D-Down  ║  Volume Down ║  System Volume -           ║
+║  D-Left  ║  J           ║  YouTube Rewind 10s        ║
+║  D-Right ║  L           ║  YouTube Fwd 10s           ║
+║  LS ↑ ░░ ║  Page Up     ║  Page Up                   ║
+║  LS ↓ ░░ ║  Page Down   ║  Page Down                 ║
+║  LS ← ░░ ║  Cmd+Shift+[ ║  Previous Tab              ║
+║  LS → ░░ ║  Cmd+Shift+] ║  Next Tab                  ║
+║  LSB     ║  Cmd+T       ║  New Tab                   ║
+║  RS ↑ ░░ ║  Up Arrow    ║  Scroll Up                 ║
+║  RS ↓ ░░ ║  Down Arrow  ║  Scroll Down               ║
+║  RS ← ░░ ║  Cmd+[       ║  Browser Back              ║
+║  RS → ░░ ║  Cmd+]       ║  Browser Forward           ║
+║  RSB     ║  Cmd+W       ║  Close Tab                 ║
+║  Start   ║  Cmd+Space   ║  Spotlight                 ║
+║  Select  ║  Escape      ║  Exit / Cancel             ║
+╚══════════╩══════════════╩════════════════════════════╝
+  ░░ = analog input (pressure-sensitive, variable rate)
+
+Usage:
+  xbox-mac-ctrl                                 # Default mapping
+  xbox-mac-ctrl --help                          # Show all options
+  xbox-mac-ctrl --reading                       # Reading mode (微信读书 etc)
+"""
+
+import os
+import sys
+import time
+import signal
+import subprocess
+
+import objc
+from Foundation import (
+    NSNotificationCenter, NSRunLoop, NSDate, NSTimer, NSObject, NSLog
+)
+from GameController import (
+    GCController, GCControllerDidConnectNotification,
+    GCControllerDidDisconnectNotification
+)
+
+# ═══════════════════════════════════════════════════════════════
+#  KEY CODE TABLE
+#  Format: (key_code, [modifier_strings]) or ("special_command", [])
+# ═══════════════════════════════════════════════════════════════
+
+# macOS HID key codes
+KEY_TABLE = {
+    # ── Navigation ──
+    "left":           (123, []),
+    "right":          (124, []),
+    "up":             (126, []),
+    "down":           (125, []),
+    "pageup":         (116, []),
+    "pagedown":       (121, []),
+
+    # ── Letters (for YouTube shortcuts etc) ──
+    "f":              (3, []),
+    "j":              (38, []),
+    "k":              (40, []),
+    "l":              (37, []),
+    "m":              (46, []),
+    "t":              (17, []),
+    "w":              (13, []),
+
+    # ── Function keys ──
+    "space":          (49, []),
+    "escape":         (53, []),
+    "enter":          (36, []),
+    "tab":            (48, []),
+    "backspace":      (51, []),
+    "delete":         (117, []),
+
+    # ── Cmd combos ──
+    "cmd+[":          (33, ["command"]),
+    "cmd+]":          (30, ["command"]),
+    "cmd+left":       (123, ["command"]),
+    "cmd+right":      (124, ["command"]),
+    "cmd+shift+[":    (33, ["command", "shift"]),
+    "cmd+shift+]":    (30, ["command", "shift"]),
+    "cmd+t":          (17, ["command"]),
+    "cmd+w":          (13, ["command"]),
+    "cmd+space":      (49, ["command"]),
+    "cmd+f":          (3, ["command"]),
+    "cmd+r":          (15, ["command"]),
+
+    # ── Special (volume handled by AppleScript) ──
+    "volume-up":      (None, []),
+    "volume-down":    (None, []),
+    "mute-system":    (None, []),
+}
+
+# AppleScript snippets for special actions
+SPECIAL_SCRIPTS = {
+    "volume-up":   'set volume output volume (output volume of (get volume settings) + 6.25)',
+    "volume-down": 'set volume output volume (output volume of (get volume settings) - 6.25)',
+    "mute-system": 'set volume output muted (not (output muted of (get volume settings)))',
+}
+
+# Key modifiers in AppleScript syntax
+MODIFIER_MAP = {
+    "command": "command",
+    "shift":   "shift",
+    "option":  "option",
+    "control": "control",
+}
+
+
+# ═══════════════════════════════════════════════════════════════
+#  DEFAULT MAPPINGS
+# ═══════════════════════════════════════════════════════════════
+
+DEFAULT = {
+    # Face buttons (A, B, X, Y)
+    "face":      ["space",    "cmd+[",   "f",       "m"],
+
+    # Shoulders (LB, RB)
+    "shoulders": ["left",     "right"],
+
+    # Triggers (LT, RT) — analog with pressure
+    "triggers":  ["up",       "down"],
+
+    # D-Pad (Up, Down, Left, Right)
+    "dpad":      ["volume-up","volume-down", "j",   "l"],
+
+    # Left Stick (↑ ↓ ← →, press)
+    "lstick":    ["pageup",   "pagedown", "cmd+shift+[","cmd+shift+]", "cmd+t"],
+
+    # Right Stick (↑ ↓ ← →, press)
+    "rstick":    ["up",       "down",     "cmd+[",     "cmd+]",     "cmd+w"],
+
+    # System buttons (Select/View, Start/Menu)
+    "sys":       ["escape",   "cmd+space"],
+}
+
+READING = {
+    "face":      ["space",    "escape",   "f",       "m"],
+    "shoulders": ["pageup",   "pagedown"],
+    "triggers":  ["up",       "down"],
+    "dpad":      ["volume-up","volume-down","j",    "l"],
+    "lstick":    ["left",     "right",    "up",       "down",     "cmd+t"],
+    "rstick":    ["up",       "down",     "cmd+[",    "cmd+]",    "cmd+w"],
+    "sys":       ["escape",   "cmd+space"],
+}
+
+
+# ═══════════════════════════════════════════════════════════════
+#  PARSE ARGS
+# ═══════════════════════════════════════════════════════════════
+
+def _parse_args():
+    cfg = DEFAULT.copy()
+
+    if "--reading" in sys.argv:
+        cfg = READING.copy()
+
+    for arg in sys.argv:
+        if arg == "--help" or arg == "-h":
+            print(__doc__)
+            sys.exit(0)
+        for key in ["face", "shoulders", "triggers", "dpad", "lstick", "rstick", "sys"]:
+            if arg.startswith(f"--{key}="):
+                cfg[key] = [k.strip() for k in arg.split("=", 1)[1].split(",")]
+
+    return cfg
+
+
+CFG = _parse_args()
+
+
+def _resolve(key_name):
+    """Resolve a key name to (key_code, modifiers_list) or ("special", script)."""
+    name = key_name.strip().lower()
+    if name == "none":
+        return None, []
+    if name in SPECIAL_SCRIPTS:
+        return ("special", name)
+    entry = KEY_TABLE.get(name)
+    if entry is None:
+        print(f"[xctrl] ⚠ Unknown key: {name}")
+        return None, []
+    return entry
+
+
+# ═══════════════════════════════════════════════════════════════
+#  PERSISTENT OSASCRIPT KEY SENDER
+# ═══════════════════════════════════════════════════════════════
+
+_osascript = None
+
+def _start_osascript():
+    global _osascript
+    try:
+        _osascript = subprocess.Popen(
+            ["osascript", "-"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        _osascript.stdin.write(
+            'tell application "System Events" to key code 0\n'
+        )
+        _osascript.stdin.flush()
+        time.sleep(0.15)
+        if _osascript.poll() is not None:
+            _osascript = None
+            return False
+        return True
+    except Exception:
+        _osascript = None
+        return False
+
+
+def _send_osascript(script):
+    """Write an AppleScript command to the persistent osascript process."""
+    global _osascript
+    if _osascript is None or _osascript.poll() is not None:
+        if not _start_osascript():
+            return
+    try:
+        _osascript.stdin.write(script + "\n")
+        _osascript.stdin.flush()
+    except (BrokenPipeError, OSError):
+        _osascript = None
+
+
+def _send_key(key_code, modifiers):
+    """Send a key event. key_code=None for special, modifiers is list of strings."""
+    if key_code is None and not modifiers:
+        return
+
+    # Special actions (volume, etc.)
+    if key_code == "special" and modifiers:
+        _send_osascript(SPECIAL_SCRIPTS.get(modifiers, ""))
+        return
+
+    if key_code is None:
+        return
+
+    # Build AppleScript
+    if not modifiers:
+        _send_osascript(
+            f'tell application "System Events" to key code {key_code}'
+        )
+    else:
+        parts = []
+        for m in modifiers:
+            m_name = MODIFIER_MAP.get(m, m)
+            parts.append(f"    key down {m_name}")
+        parts.append(f"    key code {key_code}")
+        for m in reversed(modifiers):
+            m_name = MODIFIER_MAP.get(m, m)
+            parts.append(f"    key up {m_name}")
+        script = "tell application \"System Events\"\n" + "\n".join(parts) + "\nend tell"
+        _send_osascript(script)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  ANALOG REPEATER — variable-rate key repeat for sticks/triggers
+# ═══════════════════════════════════════════════════════════════
+
+class AnalogTrigger:
+    """Sends a key at variable rate based on analog value (for LT/RT)."""
+    def __init__(self, key_code, modifiers, deadzone=0.25):
+        self.key_code = key_code
+        self.modifiers = modifiers if isinstance(modifiers, list) else [modifiers]
+        self.deadzone = deadzone
+        self.value = 0.0
+        self.last_trigger = 0.0
+
+    def update(self, value):
+        self.value = value
+
+    def tick(self):
+        if self.value < self.deadzone:
+            return
+        t = (self.value - self.deadzone) / (1.0 - self.deadzone)
+        interval = 0.20 - t * 0.15  # 200ms → 50ms
+        now = time.monotonic()
+        if now - self.last_trigger >= interval:
+            _send_key(self.key_code, self.modifiers)
+            self.last_trigger = now
+
+
+class StickAxis:
+    """Handles one stick axis with two directions."""
+    def __init__(self, neg_key_code, neg_mods, pos_key_code, pos_mods,
+                 deadzone=0.40, threshold=0.45):
+        self.neg_key = neg_key_code       # negative direction
+        self.neg_mods = neg_mods if isinstance(neg_mods, list) else [neg_mods]
+        self.pos_key = pos_key_code       # positive direction
+        self.pos_mods = pos_mods if isinstance(pos_mods, list) else [pos_mods]
+        self.deadzone = deadzone
+        self.threshold = threshold
+        self.value = 0.0
+        self.last_neg = 0.0
+        self.last_pos = 0.0
+
+    def update(self, value):
+        self.value = value
+
+    def tick(self):
+        av = abs(self.value)
+        if av < self.threshold:
+            return
+
+        # Variable rate: threshold→200ms, 1.0→80ms
+        t = (av - self.threshold) / (1.0 - self.threshold)
+        interval = 0.20 - t * 0.12
+        now = time.monotonic()
+
+        if self.value < -self.threshold and self.neg_key is not None:
+            if now - self.last_neg >= interval:
+                _send_key(self.neg_key, self.neg_mods)
+                self.last_neg = now
+
+        if self.value > self.threshold and self.pos_key is not None:
+            if now - self.last_pos >= interval:
+                _send_key(self.pos_key, self.pos_mods)
+                self.last_pos = now
+
+
+# ═══════════════════════════════════════════════════════════════
+#  CONTROLLER — main handler
+# ═══════════════════════════════════════════════════════════════
+
+DEBOUNCE_SEC = 0.18
+
+class Controller(NSObject):
+    def init(self):
+        self = objc.super(Controller, self).init()
+        if self is None:
+            return None
+        self.gamepad = None
+        self.connected_ctrl = None
+        self.last_times = {}
+        self._handler_refs = {}
+        self.scan_retries = 0
+
+        # Analog components (processed by tick_)
+        self._triggers = []    # list of AnalogTrigger
+        self._stick_axes = []  # list of StickAxis
+
+        return self
+
+    # ── Digital button handler ──────────────────────────
+    def _make_digital(self, btn_name, key_name):
+        kc, mods = _resolve(key_name)
+        if kc is None and key_name != "none":
+            return None
+
+        def handler(button, value, pressed):
+            try:
+                if not pressed:
+                    return
+                now = time.monotonic()
+                last = self.last_times.get(btn_name, 0)
+                if now - last < DEBOUNCE_SEC:
+                    return
+                self.last_times[btn_name] = now
+                NSLog(f"[xctrl] {btn_name} → {key_name}")
+                _send_key(kc, mods)
+            except Exception as e:
+                NSLog(f"[xctrl] {btn_name} error: {e}")
+        return handler
+
+    # ── Analog trigger handler (LT/RT) ──────────────────
+    def _make_trigger(self, key_name):
+        kc, mods = _resolve(key_name)
+        if kc is None and key_name != "none":
+            return None
+        trigger = AnalogTrigger(kc, mods)
+        self._triggers.append(trigger)
+
+        def handler(button, value, pressed):
+            trigger.update(value)
+        return handler
+
+    # ── Stick axis handler ──────────────────────────────
+    def _make_stick_axis(self, neg_key, pos_key):
+        nkc, nmods = _resolve(neg_key)
+        pkc, pmods = _resolve(pos_key)
+        axis = StickAxis(nkc, nmods, pkc, pmods)
+        self._stick_axes.append(axis)
+
+        def handler(axis_input, value):
+            axis.update(value)
+        return handler
+
+    # ── Setup ───────────────────────────────────────────
+    def _setup_gamepad(self, ctrl):
+        gp = ctrl.extendedGamepad()
+        if not gp:
+            return False
+
+        self._triggers = []
+        self._stick_axes = []
+        refs = {}
+
+        def bind_digital(button, name, key_name):
+            h = self._make_digital(name, key_name)
+            if h:
+                refs[name] = h
+                button.setValueChangedHandler_(h)
+
+        def bind_trigger(button, key_name):
+            h = self._make_trigger(key_name)
+            if h:
+                refs[key_name] = h
+                button.setValueChangedHandler_(h)
+
+        def bind_axis(axis_input, neg_key, pos_key):
+            h = self._make_stick_axis(neg_key, pos_key)
+            if h:
+                # key is not used for retrieval, just keep alives
+                refs[id(axis_input)] = h
+                axis_input.setValueChangedHandler_(h)
+
+        # Face buttons: A, B, X, Y
+        for i, (btn, name) in enumerate([
+            (gp.buttonA(), "A"), (gp.buttonB(), "B"),
+            (gp.buttonX(), "X"), (gp.buttonY(), "Y"),
+        ]):
+            if i < len(CFG["face"]):
+                bind_digital(btn, name, CFG["face"][i])
+
+        # Shoulders: LB, RB
+        if len(CFG["shoulders"]) >= 2:
+            bind_digital(gp.leftShoulder(),  "LB", CFG["shoulders"][0])
+            bind_digital(gp.rightShoulder(), "RB", CFG["shoulders"][1])
+
+        # Triggers: LT, RT (analog)
+        if len(CFG["triggers"]) >= 2:
+            bind_trigger(gp.leftTrigger(),  CFG["triggers"][0])
+            bind_trigger(gp.rightTrigger(), CFG["triggers"][1])
+
+        # D-Pad
+        if len(CFG["dpad"]) >= 4:
+            bind_digital(gp.dpad().up(),    "D-Up",    CFG["dpad"][0])
+            bind_digital(gp.dpad().down(),  "D-Down",  CFG["dpad"][1])
+            bind_digital(gp.dpad().left(),  "D-Left",  CFG["dpad"][2])
+            bind_digital(gp.dpad().right(), "D-Right", CFG["dpad"][3])
+
+        # Left Stick (analog axes + digital press)
+        if len(CFG["lstick"]) >= 5:
+            ls = gp.leftThumbstick()
+            bind_axis(ls.xAxis(), CFG["lstick"][2], CFG["lstick"][3])  # ← →
+            bind_axis(ls.yAxis(), CFG["lstick"][0], CFG["lstick"][1])  # ↑ ↓
+            bind_digital(ls.button(), "LSB", CFG["lstick"][4])
+
+        # Right Stick (analog axes + digital press)
+        if len(CFG["rstick"]) >= 5:
+            rs = gp.rightThumbstick()
+            bind_axis(rs.xAxis(), CFG["rstick"][2], CFG["rstick"][3])  # ← →
+            bind_axis(rs.yAxis(), CFG["rstick"][0], CFG["rstick"][1])  # ↑ ↓
+            bind_digital(rs.button(), "RSB", CFG["rstick"][4])
+
+        # System buttons: View (Select), Menu (Start)
+        if len(CFG["sys"]) >= 2:
+            bind_digital(gp.buttonOptions() if hasattr(gp, 'buttonOptions') else gp.buttonA(),
+                        "Select", CFG["sys"][0])
+            bind_digital(gp.buttonMenu(), "Start", CFG["sys"][1])
+
+        self._handler_refs = refs
+        self.gamepad = gp
+        self.connected_ctrl = ctrl
+
+        name = ctrl.vendorName() or "Xbox Controller"
+        print(f"[xctrl] ✓ {name}")
+        self._print_mapping()
+        print(f"[xctrl] Ready.")
+        self.scan_retries = 0
+        return True
+
+    def _print_mapping(self):
+        lines = []
+        for group, keys in CFG.items():
+            if group == "sys":
+                lines.append(f"  Select={keys[0]}  Start={keys[1]}")
+            else:
+                lines.append(f"  {group}: {', '.join(keys)}")
+        for line in lines:
+            print(f"[xctrl]{line}")
+
+    def _teardown_gamepad(self):
+        if self.gamepad:
+            for inp in [
+                self.gamepad.buttonA(), self.gamepad.buttonB(),
+                self.gamepad.buttonX(), self.gamepad.buttonY(),
+                self.gamepad.leftShoulder(), self.gamepad.rightShoulder(),
+                self.gamepad.leftTrigger(), self.gamepad.rightTrigger(),
+                self.gamepad.dpad().up(), self.gamepad.dpad().down(),
+                self.gamepad.dpad().left(), self.gamepad.dpad().right(),
+                self.gamepad.leftThumbstick().button(),
+                self.gamepad.rightThumbstick().button(),
+                self.gamepad.buttonMenu(),
+            ]:
+                inp.setValueChangedHandler_(None)
+            self.gamepad.leftThumbstick().xAxis().setValueChangedHandler_(None)
+            self.gamepad.leftThumbstick().yAxis().setValueChangedHandler_(None)
+            self.gamepad.rightThumbstick().xAxis().setValueChangedHandler_(None)
+            self.gamepad.rightThumbstick().yAxis().setValueChangedHandler_(None)
+        self.gamepad = None
+        self.connected_ctrl = None
+        self._handler_refs = {}
+        self._triggers = []
+        self._stick_axes = []
+
+    # ── Notifications ────────────────────────────────────
+    def onControllerConnect_(self, note):
+        ctrl = note.object()
+        if self._setup_gamepad(ctrl):
+            NSLog(f"[xctrl] Controller connected: {ctrl.vendorName()}")
+
+    def onControllerDisconnect_(self, note):
+        NSLog("[xctrl] Controller disconnected")
+        self._teardown_gamepad()
+        print("[xctrl] Controller disconnected. Waiting for reconnect...")
+
+    # ── Tick (30Hz) — analog repeaters + reconnection scan ──
+    def tick_(self, timer):
+        for t in self._triggers:
+            t.tick()
+        for a in self._stick_axes:
+            a.tick()
+
+        # Reconnection scan (every ~5s)
+        if not self.gamepad:
+            self.scan_retries += 1
+            if self.scan_retries % 150 == 0:
+                for c in GCController.controllers():
+                    if self._setup_gamepad(c):
+                        return
+
+
+# ═══════════════════════════════════════════════════════════════
+#  MAIN
+# ═══════════════════════════════════════════════════════════════
+
+def _check_accessibility():
+    result = subprocess.run(
+        ["osascript", "-e",
+         'tell application "System Events" to key code 0'],
+        capture_output=True, timeout=3
+    )
+    return result.returncode == 0
+
+
+def main():
+    print(f"[xctrl] Starting (PID={os.getpid()})...")
+
+    # ── Accessibility check ──
+    if _check_accessibility():
+        print(f"[xctrl] ✓ Accessibility permission OK")
+    else:
+        print(f"[xctrl] ✗ Accessibility permission MISSING")
+        print(f"[xctrl]   → System Settings → Privacy & Security → Accessibility")
+        print(f"[xctrl]   → Add your terminal app, then re-run")
+        print(f"[xctrl] Proceeding anyway (keys may not work)...")
+
+    # ── Start key sender ──
+    if _start_osascript():
+        print(f"[xctrl] ✓ Key sender started")
+    else:
+        print(f"[xctrl] ✗ Key sender FAILED. Check accessibility permission.")
+        print(f"[xctrl]   Is Terminal.app authorized in System Settings → Privacy → Accessibility?")
+
+    # ── Print mapping ──
+    print(f"[xctrl] Press any button on the controller to wake it.")
+
+    # ── Create pager ──
+    ctrl_handler = Controller.alloc().init()
+
+    for c in GCController.controllers():
+        if ctrl_handler._setup_gamepad(c):
+            break
+
+    # ── Notifications ──
+    center = NSNotificationCenter.defaultCenter()
+    center.addObserver_selector_name_object_(
+        ctrl_handler, "onControllerConnect:", GCControllerDidConnectNotification, None
+    )
+    center.addObserver_selector_name_object_(
+        ctrl_handler, "onControllerDisconnect:", GCControllerDidDisconnectNotification, None
+    )
+
+    GCController.startWirelessControllerDiscoveryWithCompletionHandler_(None)
+
+    # ── Tick timer: ~30Hz for analog input + reconnection ──
+    NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+        0.033, ctrl_handler, "tick:", None, True
+    )
+
+    # ── Signal handling ──
+    running = [True]
+    def _shutdown(sig, frame):
+        running[0] = False
+    signal.signal(signal.SIGINT, _shutdown)
+    signal.signal(signal.SIGTERM, _shutdown)
+
+    # ── Main run loop ──
+    runloop = NSRunLoop.currentRunLoop()
+    while running[0]:
+        runloop.runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.5))
+
+    # ── Cleanup ──
+    ctrl_handler._teardown_gamepad()
+    global _osascript
+    if _osascript:
+        try:
+            _osascript.stdin.close()
+            _osascript.wait(timeout=2)
+        except Exception:
+            _osascript.kill()
+    print("\n[xctrl] Stopped.")
+
+
+if __name__ == "__main__":
+    main()
