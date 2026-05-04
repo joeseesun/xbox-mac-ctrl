@@ -205,46 +205,21 @@ def _resolve(key_name):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  PERSISTENT OSASCRIPT KEY SENDER
+#  DIRECT OSASCRIPT KEY SENDER
 # ═══════════════════════════════════════════════════════════════
-
-_osascript = None
-
-def _start_osascript():
-    global _osascript
-    try:
-        _osascript = subprocess.Popen(
-            ["osascript", "-"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
-        _osascript.stdin.write(
-            'tell application "System Events" to key code 0\n'
-        )
-        _osascript.stdin.flush()
-        time.sleep(0.15)
-        if _osascript.poll() is not None:
-            _osascript = None
-            return False
-        return True
-    except Exception:
-        _osascript = None
-        return False
-
+# osascript - doesn't execute line by line — it waits for EOF.
+# So we call osascript -e for each command. Simple and reliable.
 
 def _send_osascript(script):
-    """Write an AppleScript command to the persistent osascript process."""
-    global _osascript
-    if _osascript is None or _osascript.poll() is not None:
-        if not _start_osascript():
-            return
+    """Execute AppleScript via osascript -e."""
     try:
-        _osascript.stdin.write(script + "\n")
-        _osascript.stdin.flush()
-    except (BrokenPipeError, OSError):
-        _osascript = None
+        subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True,
+            timeout=3,
+        )
+    except Exception:
+        pass
 
 
 def _send_key(key_code, modifiers):
@@ -254,7 +229,10 @@ def _send_key(key_code, modifiers):
 
     # Special actions (volume, etc.)
     if key_code == "special" and modifiers:
-        _send_osascript(SPECIAL_SCRIPTS.get(modifiers, ""))
+        NSLog(f"[xctrl] special: {modifiers}")
+        script = SPECIAL_SCRIPTS.get(modifiers, "")
+        if script:
+            _send_osascript(script)
         return
 
     if key_code is None:
@@ -566,7 +544,7 @@ class Controller(NSObject):
 def _check_accessibility():
     result = subprocess.run(
         ["osascript", "-e",
-         'tell application "System Events" to key code 0'],
+         'tell application "System Events" to get name of first process'],
         capture_output=True, timeout=3
     )
     return result.returncode == 0
@@ -582,14 +560,6 @@ def main():
         print(f"[xctrl] ✗ Accessibility permission MISSING")
         print(f"[xctrl]   → System Settings → Privacy & Security → Accessibility")
         print(f"[xctrl]   → Add your terminal app, then re-run")
-        print(f"[xctrl] Proceeding anyway (keys may not work)...")
-
-    # ── Start key sender ──
-    if _start_osascript():
-        print(f"[xctrl] ✓ Key sender started")
-    else:
-        print(f"[xctrl] ✗ Key sender FAILED. Check accessibility permission.")
-        print(f"[xctrl]   Is Terminal.app authorized in System Settings → Privacy → Accessibility?")
 
     # ── Print mapping ──
     print(f"[xctrl] Press any button on the controller to wake it.")
@@ -631,13 +601,6 @@ def main():
 
     # ── Cleanup ──
     ctrl_handler._teardown_gamepad()
-    global _osascript
-    if _osascript:
-        try:
-            _osascript.stdin.close()
-            _osascript.wait(timeout=2)
-        except Exception:
-            _osascript.kill()
     print("\n[xctrl] Stopped.")
 
 
