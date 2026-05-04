@@ -488,10 +488,12 @@ class Controller(NSObject):
         # Left Stick → mouse cursor + digital press
         self._mouse_stick = MouseStick()
         ls = gp.leftThumbstick()
-        refs["mouse_x"] = ls.xAxis()
-        ls.xAxis().setValueChangedHandler_(lambda inp, v: self._mouse_stick.update_x(v))
-        refs["mouse_y"] = ls.yAxis()
-        ls.yAxis().setValueChangedHandler_(lambda inp, v: self._mouse_stick.update_y(v))
+        hx = lambda inp, v: self._mouse_stick.update_x(v)
+        hy = lambda inp, v: self._mouse_stick.update_y(v)
+        refs["mouse_x"] = hx
+        refs["mouse_y"] = hy
+        ls.xAxis().setValueChangedHandler_(hx)
+        ls.yAxis().setValueChangedHandler_(hy)
         if hasattr(gp, 'leftThumbstickButton'):
             bind_digital(gp.leftThumbstickButton(), "LSB", CFG["lstick"][4])
 
