@@ -469,19 +469,21 @@ class Controller(NSObject):
             ls = gp.leftThumbstick()
             bind_axis(ls.xAxis(), CFG["lstick"][2], CFG["lstick"][3])  # ← →
             bind_axis(ls.yAxis(), CFG["lstick"][0], CFG["lstick"][1])  # ↑ ↓
-            bind_digital(ls.button(), "LSB", CFG["lstick"][4])
+            if hasattr(gp, 'leftThumbstickButton'):
+                bind_digital(gp.leftThumbstickButton(), "LSB", CFG["lstick"][4])
 
         # Right Stick (analog axes + digital press)
         if len(CFG["rstick"]) >= 5:
             rs = gp.rightThumbstick()
             bind_axis(rs.xAxis(), CFG["rstick"][2], CFG["rstick"][3])  # ← →
             bind_axis(rs.yAxis(), CFG["rstick"][0], CFG["rstick"][1])  # ↑ ↓
-            bind_digital(rs.button(), "RSB", CFG["rstick"][4])
+            if hasattr(gp, 'rightThumbstickButton'):
+                bind_digital(gp.rightThumbstickButton(), "RSB", CFG["rstick"][4])
 
         # System buttons: View (Select), Menu (Start)
         if len(CFG["sys"]) >= 2:
-            bind_digital(gp.buttonOptions() if hasattr(gp, 'buttonOptions') else gp.buttonA(),
-                        "Select", CFG["sys"][0])
+            if hasattr(gp, 'buttonOptions'):
+                bind_digital(gp.buttonOptions(), "Select", CFG["sys"][0])
             bind_digital(gp.buttonMenu(), "Start", CFG["sys"][1])
 
         self._handler_refs = refs
@@ -514,11 +516,12 @@ class Controller(NSObject):
                 self.gamepad.leftTrigger(), self.gamepad.rightTrigger(),
                 self.gamepad.dpad().up(), self.gamepad.dpad().down(),
                 self.gamepad.dpad().left(), self.gamepad.dpad().right(),
-                self.gamepad.leftThumbstick().button(),
-                self.gamepad.rightThumbstick().button(),
+                self.gamepad.leftThumbstickButton() if hasattr(self.gamepad, 'leftThumbstickButton') else None,
+                self.gamepad.rightThumbstickButton() if hasattr(self.gamepad, 'rightThumbstickButton') else None,
                 self.gamepad.buttonMenu(),
             ]:
-                inp.setValueChangedHandler_(None)
+                if inp is not None:
+                    inp.setValueChangedHandler_(None)
             self.gamepad.leftThumbstick().xAxis().setValueChangedHandler_(None)
             self.gamepad.leftThumbstick().yAxis().setValueChangedHandler_(None)
             self.gamepad.rightThumbstick().xAxis().setValueChangedHandler_(None)
