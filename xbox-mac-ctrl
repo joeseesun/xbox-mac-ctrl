@@ -16,7 +16,7 @@ REQUIRES: Accessibility permission
 ║  A       ║  Left Click  ║  Mouse Click               ║
 ║  B       ║  Cmd+[       ║  Browser Back              ║
 ║  X       ║  Space       ║  Play/Pause                ║
-║  Y       ║  F           ║  Fullscreen Toggle         ║
+║  Y       ║  Right Click ║  Context Menu              ║
 ║  LB      ║  Left Arrow  ║  Seek Back / Prev Page     ║
 ║  RB      ║  Right Arrow ║  Seek Fwd  / Next Page     ║
 ║  LT ░░   ║  Up Arrow    ║  Scroll Up  (pressure=speed)║
@@ -120,7 +120,7 @@ _CG_FLAGS = {
 
 DEFAULT = {
     # Face buttons (A, B, X, Y)
-    "face":      ["click",    "cmd+[",   "space",   "f"],
+    "face":      ["click",    "cmd+[",   "space",   "rightclick"],
 
     # Shoulders (LB, RB)
     "shoulders": ["left",     "right"],
@@ -181,7 +181,7 @@ def _resolve(key_name):
     name = key_name.strip().lower()
     if name == "none":
         return None, []
-    if name in ("click", "volume-up", "volume-down"):
+    if name in ("click", "rightclick", "volume-up", "volume-down"):
         return ("special", name)
     entry = KEY_TABLE.get(name)
     if entry is None:
@@ -204,6 +204,14 @@ def _send_key(key_code, modifiers):
         pos = Quartz.CGEventGetLocation(Quartz.CGEventCreate(None))
         down = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventLeftMouseDown, pos, 0)
         up = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventLeftMouseUp, pos, 0)
+        Quartz.CGEventPost(Quartz.kCGSessionEventTap, down)
+        Quartz.CGEventPost(Quartz.kCGSessionEventTap, up)
+        return
+
+    if key_code == "special" and modifiers == "rightclick":
+        pos = Quartz.CGEventGetLocation(Quartz.CGEventCreate(None))
+        down = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventRightMouseDown, pos, 0)
+        up = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventRightMouseUp, pos, 0)
         Quartz.CGEventPost(Quartz.kCGSessionEventTap, down)
         Quartz.CGEventPost(Quartz.kCGSessionEventTap, up)
         return
