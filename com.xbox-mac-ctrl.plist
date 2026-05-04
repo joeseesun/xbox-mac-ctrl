@@ -7,6 +7,7 @@
 
     <key>ProgramArguments</key>
     <array>
+        <string>/opt/miniconda3/bin/python3</string>
         <string>/usr/local/bin/xbox-mac-ctrl</string>
     </array>
 
