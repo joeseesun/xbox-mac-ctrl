@@ -13,10 +13,10 @@ REQUIRES: Accessibility permission
 ╠══════════╦══════════════╦════════════════════════════╣
 ║  BUTTON  ║    ACTION    ║  DESCRIPTION               ║
 ╠══════════╬══════════════╬════════════════════════════╣
-║  A       ║  Space       ║  Play/Pause                ║
+║  A       ║  Left Click  ║  Mouse Click               ║
 ║  B       ║  Cmd+[       ║  Browser Back              ║
-║  X       ║  F           ║  Fullscreen Toggle         ║
-║  Y       ║  M           ║  Mute Toggle               ║
+║  X       ║  Space       ║  Play/Pause                ║
+║  Y       ║  F           ║  Fullscreen Toggle         ║
 ║  LB      ║  Left Arrow  ║  Seek Back / Prev Page     ║
 ║  RB      ║  Right Arrow ║  Seek Fwd  / Next Page     ║
 ║  LT ░░   ║  Up Arrow    ║  Scroll Up  (pressure=speed)║
@@ -60,11 +60,9 @@ from GameController import (
 )
 
 # ═══════════════════════════════════════════════════════════════
-#  KEY CODE TABLE
-#  Format: (key_code, [modifier_strings]) or ("special_command", [])
+#  KEY CODE TABLE  (macOS HID key codes)
 # ═══════════════════════════════════════════════════════════════
 
-# macOS HID key codes
 KEY_TABLE = {
     # ── Navigation ──
     "left":           (123, []),
@@ -74,7 +72,7 @@ KEY_TABLE = {
     "pageup":         (116, []),
     "pagedown":       (121, []),
 
-    # ── Letters (for YouTube shortcuts etc) ──
+    # ── Letters ──
     "f":              (3, []),
     "j":              (38, []),
     "k":              (40, []),
@@ -103,26 +101,19 @@ KEY_TABLE = {
     "cmd+space":      (49, ["command"]),
     "cmd+f":          (3, ["command"]),
     "cmd+r":          (15, ["command"]),
-
-    # ── Special (volume handled by AppleScript) ──
-    "volume-up":      (None, []),
-    "volume-down":    (None, []),
-    "mute-system":    (None, []),
 }
 
-# AppleScript snippets for special actions
-SPECIAL_SCRIPTS = {
-    "volume-up":   'set volume output volume (output volume of (get volume settings) + 6.25)',
-    "volume-down": 'set volume output volume (output volume of (get volume settings) - 6.25)',
-    "mute-system": 'set volume output muted (not (output muted of (get volume settings)))',
-}
+# AppleScript for volume (no CGEvent API for this)
+_VOL_UP   = 'set volume output volume (output volume of (get volume settings) + 6.25)'
+_VOL_DOWN = 'set volume output volume (output volume of (get volume settings) - 6.25)'
+_VOL_MUTE = 'set volume output muted (not (output muted of (get volume settings)))'
 
-# Key modifiers in AppleScript syntax
-MODIFIER_MAP = {
-    "command": "command",
-    "shift":   "shift",
-    "option":  "option",
-    "control": "control",
+# CGEvent modifier flags
+_CG_FLAGS = {
+    "command": Quartz.kCGEventFlagMaskCommand,
+    "shift":   Quartz.kCGEventFlagMaskShift,
+    "option":  Quartz.kCGEventFlagMaskAlternate,
+    "control": Quartz.kCGEventFlagMaskControl,
 }
 
 
@@ -132,7 +123,7 @@ MODIFIER_MAP = {
 
 DEFAULT = {
     # Face buttons (A, B, X, Y)
-    "face":      ["space",    "cmd+[",   "f",       "m"],
+    "face":      ["click",    "cmd+[",   "space",   "f"],
 
     # Shoulders (LB, RB)
     "shoulders": ["left",     "right"],
@@ -143,8 +134,8 @@ DEFAULT = {
     # D-Pad (Up, Down, Left, Right)
     "dpad":      ["volume-up","volume-down", "cmd+shift+[", "cmd+shift+]"],
 
-    # Left Stick (↑ ↓ ← →, press)
-    "lstick":    ["pageup",   "pagedown", "cmd+shift+[","cmd+shift+]", "cmd+t"],
+    # Left Stick → mouse cursor (handled separately; button press)
+    "lstick":    ["none",    "none",    "none",      "none",       "cmd+t"],
 
     # Right Stick (↑ ↓ ← →, press)
     "rstick":    ["up",       "down",     "cmd+[",     "cmd+]",     "cmd+w"],
@@ -189,11 +180,11 @@ CFG = _parse_args()
 
 
 def _resolve(key_name):
-    """Resolve a key name to (key_code, modifiers_list) or ("special", script)."""
+    """Resolve a key name to (key_code, modifiers_list) or ("special", name)."""
     name = key_name.strip().lower()
     if name == "none":
         return None, []
-    if name in SPECIAL_SCRIPTS:
+    if name in ("click", "volume-up", "volume-down"):
         return ("special", name)
     entry = KEY_TABLE.get(name)
     if entry is None:
@@ -203,55 +194,48 @@ def _resolve(key_name):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  DIRECT OSASCRIPT KEY SENDER
+#  CGEvent KEY SENDER (bypasses input method!)
 # ═══════════════════════════════════════════════════════════════
-# osascript - doesn't execute line by line — it waits for EOF.
-# So we call osascript -e for each command. Simple and reliable.
-
-def _send_osascript(script):
-    """Execute AppleScript via osascript -e."""
-    try:
-        subprocess.run(
-            ["osascript", "-e", script],
-            capture_output=True,
-            timeout=3,
-        )
-    except Exception:
-        pass
-
 
 def _send_key(key_code, modifiers):
-    """Send a key event. key_code=None for special, modifiers is list of strings."""
+    """Send keystroke via CGEvent — bypasses Chinese input method."""
     if key_code is None and not modifiers:
         return
 
-    # Special actions (volume, etc.)
-    if key_code == "special" and modifiers:
-        NSLog(f"[xctrl] special: {modifiers}")
-        script = SPECIAL_SCRIPTS.get(modifiers, "")
-        if script:
-            _send_osascript(script)
+    # ── Mouse click ──
+    if key_code == "special" and modifiers == "click":
+        pos = Quartz.CGEventGetLocation(Quartz.CGEventCreate(None))
+        down = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventLeftMouseDown, pos, 0)
+        up = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventLeftMouseUp, pos, 0)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, down)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
         return
 
-    if key_code is None:
+    # ── Volume (AppleScript — no CGEvent API) ──
+    if key_code == "special" and modifiers == "volume-up":
+        subprocess.run(["osascript", "-e", _VOL_UP], capture_output=True, timeout=3)
+        return
+    if key_code == "special" and modifiers == "volume-down":
+        subprocess.run(["osascript", "-e", _VOL_DOWN], capture_output=True, timeout=3)
         return
 
-    # Build AppleScript
-    if not modifiers:
-        _send_osascript(
-            f'tell application "System Events" to key code {key_code}'
-        )
-    else:
-        parts = []
-        for m in modifiers:
-            m_name = MODIFIER_MAP.get(m, m)
-            parts.append(f"    key down {m_name}")
-        parts.append(f"    key code {key_code}")
-        for m in reversed(modifiers):
-            m_name = MODIFIER_MAP.get(m, m)
-            parts.append(f"    key up {m_name}")
-        script = "tell application \"System Events\"\n" + "\n".join(parts) + "\nend tell"
-        _send_osascript(script)
+    if key_code is None or key_code == "special":
+        return
+
+    # ── Keyboard via CGEvent ──
+    mods = modifiers if isinstance(modifiers, list) else [modifiers]
+    flags = 0
+    for m in mods:
+        flags |= _CG_FLAGS.get(m, 0)
+
+    event = Quartz.CGEventCreateKeyboardEvent(None, key_code, True)
+    if flags:
+        Quartz.CGEventSetFlags(event, flags)
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+
+    event = Quartz.CGEventCreateKeyboardEvent(None, key_code, False)
+    # No flags on key-up (matching physical keyboard behavior)
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -354,7 +338,7 @@ class MouseStick:
 
         pos = Quartz.CGEventGetLocation(Quartz.CGEventCreate(None))
         new_x = pos.x + dx
-        new_y = pos.y + dy
+        new_y = pos.y - dy  # negate: stick ↑ = screen Y↓
         event = Quartz.CGEventCreateMouseEvent(
             None, Quartz.kCGEventMouseMoved, (new_x, new_y), 0
         )
