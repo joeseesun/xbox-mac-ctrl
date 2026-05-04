@@ -26,11 +26,8 @@ REQUIRES: Accessibility permission
 ║  D-Left  ║  Cmd+Shift+[ ║  Previous Tab              ║
 ║  D-Right ║  Cmd+Shift+] ║  Next Tab                  ║
 ║  LS ░░   ║  Mouse Move  ║  Cursor (analog)           ║
-║  LSB     ║  Cmd+T       ║  New Tab                   ║
-║  RS ↑ ░░ ║  Up Arrow    ║  Scroll Up                 ║
-║  RS ↓ ░░ ║  Down Arrow  ║  Scroll Down               ║
-║  RS ← ░░ ║  Cmd+[       ║  Browser Back              ║
-║  RS → ░░ ║  Cmd+]       ║  Browser Forward           ║
+║  LSB     ║  Left Click  ║  Mouse Click               ║
+║  RS ░░   ║  Mouse Move  ║  Cursor (analog)           ║
 ║  RSB     ║  Cmd+W       ║  Close Tab                 ║
 ║  Start   ║  Cmd+Space   ║  Spotlight                 ║
 ║  Select  ║  Escape      ║  Exit / Cancel             ║
@@ -134,11 +131,11 @@ DEFAULT = {
     # D-Pad (Up, Down, Left, Right)
     "dpad":      ["volume-up","volume-down", "cmd+shift+[", "cmd+shift+]"],
 
-    # Left Stick → mouse cursor (handled separately; button press)
-    "lstick":    ["none",    "none",    "none",      "none",       "cmd+t"],
+    # Left Stick — mouse cursor (button = click)
+    "lstick":    ["none",     "none",    "none",      "none",      "click"],
 
-    # Right Stick (↑ ↓ ← →, press)
-    "rstick":    ["up",       "down",     "cmd+[",     "cmd+]",     "cmd+w"],
+    # Right Stick — also mouse cursor (button = close tab)
+    "rstick":    ["none",     "none",    "none",      "none",      "cmd+w"],
 
     # System buttons (Select/View, Start/Menu)
     "sys":       ["escape",   "cmd+space"],
@@ -207,8 +204,8 @@ def _send_key(key_code, modifiers):
         pos = Quartz.CGEventGetLocation(Quartz.CGEventCreate(None))
         down = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventLeftMouseDown, pos, 0)
         up = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventLeftMouseUp, pos, 0)
-        Quartz.CGEventPost(Quartz.kCGHIDEventTap, down)
-        Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
+        Quartz.CGEventPost(Quartz.kCGSessionEventTap, down)
+        Quartz.CGEventPost(Quartz.kCGSessionEventTap, up)
         return
 
     # ── Volume (AppleScript — no CGEvent API) ──
@@ -228,14 +225,18 @@ def _send_key(key_code, modifiers):
     for m in mods:
         flags |= _CG_FLAGS.get(m, 0)
 
+    NSLog(f"[xctrl] CGEvent kc={key_code} down flags={flags}")
     event = Quartz.CGEventCreateKeyboardEvent(None, key_code, True)
     if flags:
         Quartz.CGEventSetFlags(event, flags)
-    Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+    Quartz.CGEventPost(Quartz.kCGSessionEventTap, event)
+
+    # Brief pause to let the system register the key-down
+    time.sleep(0.01)
 
     event = Quartz.CGEventCreateKeyboardEvent(None, key_code, False)
-    # No flags on key-up (matching physical keyboard behavior)
-    Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+    Quartz.CGEventPost(Quartz.kCGSessionEventTap, event)
+    NSLog(f"[xctrl] CGEvent kc={key_code} up")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -342,7 +343,7 @@ class MouseStick:
         event = Quartz.CGEventCreateMouseEvent(
             None, Quartz.kCGEventMouseMoved, (new_x, new_y), 0
         )
-        Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+        Quartz.CGEventPost(Quartz.kCGSessionEventTap, event)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -469,25 +470,29 @@ class Controller(NSObject):
             bind_digital(gp.dpad().left(),  "D-Left",  CFG["dpad"][2])
             bind_digital(gp.dpad().right(), "D-Right", CFG["dpad"][3])
 
-        # Left Stick → mouse cursor + digital press
+        # Both sticks → shared mouse cursor
         self._mouse_stick = MouseStick()
+        ms = self._mouse_stick
+
+        # Left Stick
         ls = gp.leftThumbstick()
-        hx = lambda inp, v: self._mouse_stick.update_x(v)
-        hy = lambda inp, v: self._mouse_stick.update_y(v)
-        refs["mouse_x"] = hx
-        refs["mouse_y"] = hy
-        ls.xAxis().setValueChangedHandler_(hx)
-        ls.yAxis().setValueChangedHandler_(hy)
+        lhx = lambda inp, v: ms.update_x(v)
+        lhy = lambda inp, v: ms.update_y(v)
+        refs["lsx"] = lhx; refs["lsy"] = lhy
+        ls.xAxis().setValueChangedHandler_(lhx)
+        ls.yAxis().setValueChangedHandler_(lhy)
         if hasattr(gp, 'leftThumbstickButton'):
             bind_digital(gp.leftThumbstickButton(), "LSB", CFG["lstick"][4])
 
-        # Right Stick (analog axes + digital press)
-        if len(CFG["rstick"]) >= 5:
-            rs = gp.rightThumbstick()
-            bind_axis(rs.xAxis(), CFG["rstick"][2], CFG["rstick"][3], "RS←→")  # ← →
-            bind_axis(rs.yAxis(), CFG["rstick"][0], CFG["rstick"][1], "RS↑↓")  # ↑ ↓
-            if hasattr(gp, 'rightThumbstickButton'):
-                bind_digital(gp.rightThumbstickButton(), "RSB", CFG["rstick"][4])
+        # Right Stick — same MouseStick, shared cursor
+        rs = gp.rightThumbstick()
+        rhx = lambda inp, v: ms.update_x(v)
+        rhy = lambda inp, v: ms.update_y(v)
+        refs["rsx"] = rhx; refs["rsy"] = rhy
+        rs.xAxis().setValueChangedHandler_(rhx)
+        rs.yAxis().setValueChangedHandler_(rhy)
+        if hasattr(gp, 'rightThumbstickButton'):
+            bind_digital(gp.rightThumbstickButton(), "RSB", CFG["rstick"][4])
 
         # System buttons: View (Select), Menu (Start)
         if len(CFG["sys"]) >= 2:
